@@ -142,3 +142,4 @@ Esta fase transforma el sistema en una plataforma multi-edificio real, con aisla
 - [ ] Implementar Selector de Edificios en Frontend (Admin).
 - [ ] Activar Interceptors para Audit Log.
 "# Building_Manager" 
+"# Building_Manager" 
