@@ -1,0 +1,381 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  ADMIN
+  ACCOUNTING
+  OPERATIONS
+  MAINTENANCE
+  TENANT
+}
+
+// Roles específicos por edificio
+enum BuildingUserRole {
+  BUILDING_ADMIN        // Admin del edificio (puede crear usuarios, ver todo)
+  MANAGER               // Gerente (acceso casi completo)
+  LAUNDRY_MANAGER       // Encargado de lavandería y secadora
+  MAINTENANCE_STAFF     // Personal de mantenimiento
+  TENANT                // Inquilino (acceso limitado a su unidad)
+}
+
+enum UnitStatus {
+  OCCUPIED
+  VACANT
+  MAINTENANCE
+}
+
+enum ContractStatus {
+  ACTIVE
+  EXPIRED
+  TERMINATED
+}
+
+enum ChargeType {
+  RENT
+  EXPENSES // Expensas
+}
+
+enum ChargeStatus {
+  PENDING
+  PAID
+  OVERDUE
+}
+
+enum ReservationStatus {
+  CONFIRMED
+  CANCELLED
+  NO_SHOW
+}
+
+enum TicketStatus {
+  OPEN
+  IN_PROGRESS
+  CLOSED
+}
+
+// Enum for Building Status
+enum BuildingStatus {
+  ACTIVE
+  INACTIVE
+}
+
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  password  String   
+  role      UserRole // Global role (e.g. SUPERADMIN, or default USER)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant    Tenant?
+  assignedTickets MaintenanceTicket[]
+  
+  // Multi-tenancy
+  buildingRoles UserBuildingRole[]
+
+  @@map("users")
+}
+
+model Building {
+  id        String   @id @default(uuid())
+  name      String
+  slug      String   @unique
+  address   String
+  description String?
+  contact   String?
+  status    BuildingStatus @default(ACTIVE)
+  settings  Json?    // Stores specific rules (e.g. laundry limits, timezone)
+
+  units     Unit[]
+  
+  // Relations for strict isolation (Direct access)
+  contracts Contract[]
+  tenants   Tenant[]
+  charges   Charge[]
+  invoices  Invoice[]
+  closings  MonthlyClosing[]
+  userRoles UserBuildingRole[]
+  auditLogs AuditLog[]
+  
+  // Missing relations added here
+  laundryReservations LaundryReservation[]
+  maintenanceTickets  MaintenanceTicket[]
+  meters              Meter[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("buildings")
+}
+
+model UserBuildingRole {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  buildingId String
+  building  Building @relation(fields: [buildingId], references: [id])
+  role      BuildingUserRole // Rol específico por edificio
+  
+  // Información adicional del usuario en este contexto
+  firstName String?
+  lastName1 String?
+  lastName2 String?   // Segundo apellido (opcional)
+  ci        String?   // Cédula de Identidad (opcional)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, buildingId])
+  @@map("user_building_roles")
+}
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  action     String
+  entity     String
+  entityId   String?
+  details    Json?
+  ip         String?
+  
+  userId     String?
+  buildingId String?
+  building   Building? @relation(fields: [buildingId], references: [id])
+
+  createdAt  DateTime @default(now())
+
+  @@map("audit_logs")
+}
+
+model Unit {
+  id         String     @id @default(uuid())
+  number     String
+  floor      Int
+  sizeSqM    Float
+  status     UnitStatus @default(VACANT)
+  
+  buildingId String
+  building   Building   @relation(fields: [buildingId], references: [id])
+  
+  contracts  Contract[]
+  reservations LaundryReservation[]
+  tickets    MaintenanceTicket[]
+  meters     Meter[]
+
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+
+  @@map("units")
+}
+
+model Tenant {
+  id        String   @id @default(uuid())
+  firstName String
+  lastName1 String
+  lastName2 String?
+  email     String   @unique
+  phone     String?
+  isActive  Boolean  @default(true)
+  
+  userId    String?  @unique
+  user      User?    @relation(fields: [userId], references: [id])
+  
+  // NOTE: A tenant might theoretically be in multiple buildings if they rent units in different ones.
+  // BUT the prompt says "Aislar datos por edificio" and "Agregar building_id a TODAS las entidades".
+  // If a User is a Tenant in 2 buildings, they might have 2 Tenant records?
+  // Let's add buildingId here. If they are in 2 buildings, we treat them as 2 Tenant entities (same User).
+  buildingId String
+  building   Building @relation(fields: [buildingId], references: [id])
+
+  contracts Contract[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("tenants")
+}
+
+model Contract {
+  id            String         @id @default(uuid())
+  startDate     DateTime
+  endDate       DateTime
+  rentAmount    Decimal        @db.Decimal(10, 2)
+  expensesAmount Decimal       @db.Decimal(10, 2)
+  status        ContractStatus @default(ACTIVE)
+
+  buildingId String   // Explicit isolation
+  building   Building @relation(fields: [buildingId], references: [id])
+
+  tenantId      String
+  tenant        Tenant         @relation(fields: [tenantId], references: [id])
+
+  unitId        String
+  unit          Unit           @relation(fields: [unitId], references: [id])
+
+  charges       Charge[]
+  monthlyClosings MonthlyClosing[]
+
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  @@map("contracts")
+}
+
+model Charge {
+  id            String       @id @default(uuid())
+  type          ChargeType
+  amount        Decimal      @db.Decimal(10, 2)
+  status        ChargeStatus @default(PENDING)
+  generatedDate DateTime     @default(now())
+  dueDate       DateTime
+
+  buildingId    String
+  building      Building     @relation(fields: [buildingId], references: [id])
+
+  contractId    String
+  contract      Contract     @relation(fields: [contractId], references: [id])
+  
+  invoices      Invoice[]
+
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  @@map("charges")
+}
+
+model LaundryReservation {
+  id        String            @id @default(uuid())
+  date      DateTime          @db.Date
+  startTime DateTime          
+  endTime   DateTime
+  machineId String
+  status    ReservationStatus @default(CONFIRMED)
+
+  buildingId String
+  building   Building @relation(fields: [buildingId], references: [id])
+
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
+
+  unitId    String
+  unit      Unit              @relation(fields: [unitId], references: [id])
+  
+  @@map("laundry_reservations")
+}
+
+model MaintenanceTicket {
+  id          String       @id @default(uuid())
+  title       String
+  description String
+  status      TicketStatus @default(OPEN)
+
+  unitId      String
+  unit        Unit         @relation(fields: [unitId], references: [id])
+
+  assignedToId String?
+  assignedTo   User?       @relation(fields: [assignedToId], references: [id])
+  
+  buildingId  String?      // Optional for migration safe-ish, but should be required
+  building    Building?    @relation(fields: [buildingId], references: [id])
+
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  @@map("maintenance_tickets")
+}
+
+model Meter {
+  id            String   @id @default(uuid())
+  type          ServiceType
+  unitId        String?
+  unit          Unit?    @relation(fields: [unitId], references: [id])
+  isBuildingMeter Boolean @default(false) 
+
+  buildingId    String
+  building      Building @relation(fields: [buildingId], references: [id])
+
+  readings      MeterReading[]
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@map("meters")
+}
+
+model MeterReading {
+  id        String   @id @default(uuid())
+  value     Float
+  date      DateTime @default(now())
+  
+  meterId   String
+  meter     Meter    @relation(fields: [meterId], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("meter_readings")
+}
+
+model MonthlyClosing {
+  id        String   @id @default(uuid())
+  month     Int
+  year      Int
+  status    ClosingStatus @default(PENDING)
+  totalAmount Decimal @db.Decimal(10, 2)
+
+  contractId String
+  contract   Contract @relation(fields: [contractId], references: [id])
+  
+  buildingId String
+  building   Building @relation(fields: [buildingId], references: [id])
+
+  invoices   Invoice[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("monthly_closings")
+}
+
+model Invoice {
+  id          String   @id @default(uuid())
+  url         String
+  generatedAt DateTime @default(now())
+  status      InvoiceStatus @default(ISSUED)
+
+  chargeId    String? 
+  charge      Charge?  @relation(fields: [chargeId], references: [id])
+
+  // Can link to Closing if aggregating
+  closingId   String?
+  closing     MonthlyClosing? @relation(fields: [closingId], references: [id])
+  
+  buildingId  String
+  building    Building @relation(fields: [buildingId], references: [id])
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("invoices")
+}
+
+enum ServiceType {
+  WATER
+  ELECTRICITY
+  GAS
+}
+
+enum ClosingStatus {
+  PENDING
+  CLOSED
+}
+
+enum InvoiceStatus {
+  ISSUED
+  VOIDED
+}
